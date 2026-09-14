@@ -13,7 +13,7 @@ import (
 	"github.com/Devlaner/devlane/api/internal/store"
 )
 
-type smtpSettings struct {
+type SMTPSettings struct {
 	Host        string
 	Port        int
 	SenderEmail string
@@ -22,7 +22,7 @@ type smtpSettings struct {
 	Password    string
 }
 
-func getEmailSettings(ctx context.Context, s *store.InstanceSettingStore) (*smtpSettings, error) {
+func getEmailSettings(ctx context.Context, s *store.InstanceSettingStore) (*SMTPSettings, error) {
 	row, err := s.Get(ctx, "email")
 	if err != nil || row == nil {
 		return nil, fmt.Errorf("email settings not found")
@@ -55,7 +55,7 @@ func getEmailSettings(ctx context.Context, s *store.InstanceSettingStore) (*smtp
 	if host == "" {
 		return nil, fmt.Errorf("email host not configured")
 	}
-	return &smtpSettings{
+	return &SMTPSettings{
 		Host:        host,
 		Port:        port,
 		SenderEmail: strings.TrimSpace(sender),
@@ -78,22 +78,32 @@ func NewSMTPEmailSender(instanceSettings *store.InstanceSettingStore, log *slog.
 			LogSkip(log, "instance email not configured", to, err)
 			return err
 		}
-		from := cfg.SenderEmail
-		if from == "" {
-			from = cfg.Username
-		}
-		if from == "" {
-			LogSkip(log, "sender_email and username empty", to, fmt.Errorf("sender not set"))
-			return fmt.Errorf("sender email not configured")
-		}
-		addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
-		msg := buildMessage(to, from, subject, body)
-		if err := sendMailWithConfig(addr, cfg.Host, cfg.Port, cfg.Security, auth, from, to, msg); err != nil {
+		if err := SendWithSMTPSettings(cfg, to, subject, body, log); err != nil {
 			return err
 		}
 		return nil
 	}
+}
+
+func SendWithSMTPSettings(cfg *SMTPSettings, to, subject, body string, log *slog.Logger) error {
+	if cfg == nil {
+		return fmt.Errorf("SMTP settings not configured")
+	}
+	from := cfg.SenderEmail
+	if from == "" {
+		from = cfg.Username
+	}
+	if from == "" {
+		LogSkip(log, "sender_email and username empty", to, fmt.Errorf("sender not set"))
+		return fmt.Errorf("sender email not configured")
+	}
+	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+	msg := buildMessage(to, from, subject, body)
+	if err := sendMailWithConfig(addr, cfg.Host, cfg.Port, cfg.Security, auth, from, to, msg); err != nil {
+		return err
+	}
+	return nil
 }
 
 // sendMailWithConfig sends email using smtp.SendMail or, for port 465 with SSL,
