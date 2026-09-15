@@ -98,7 +98,10 @@ func SendWithSMTPSettings(cfg *SMTPSettings, to, subject, body string, log *slog
 		return fmt.Errorf("sender email not configured")
 	}
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+	var auth smtp.Auth
+	if cfg.Username != "" || cfg.Password != "" {
+		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+	}
 	msg := buildMessage(to, from, subject, body)
 	if err := sendMailWithConfig(addr, cfg.Host, cfg.Port, cfg.Security, auth, from, to, msg); err != nil {
 		return err
@@ -121,8 +124,10 @@ func sendMailWithConfig(addr, host string, port int, security string, auth smtp.
 			return err
 		}
 		defer client.Close()
-		if err := client.Auth(auth); err != nil {
-			return err
+		if auth != nil {
+			if err := client.Auth(auth); err != nil {
+				return err
+			}
 		}
 		if err := client.Mail(from); err != nil {
 			return err
