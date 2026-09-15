@@ -85,6 +85,7 @@ func NewSMTPEmailSender(instanceSettings *store.InstanceSettingStore, log *slog.
 	}
 }
 
+// SendWithSMTPSettings sends an email using the supplied SMTP settings without persisting them.
 func SendWithSMTPSettings(cfg *SMTPSettings, to, subject, body string, log *slog.Logger) error {
 	if cfg == nil {
 		return fmt.Errorf("SMTP settings not configured")
