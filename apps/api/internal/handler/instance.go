@@ -682,6 +682,7 @@ func (h *InstanceSettingsHandler) SendTestEmail(c *gin.Context) {
 	}
 
 	if err := mail.SendWithSMTPSettings(
+		c.Request.Context(),
 		cfg,
 		recipient,
 		"Devlane SMTP test email",

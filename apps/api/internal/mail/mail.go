@@ -5,9 +5,11 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/smtp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Devlaner/devlane/api/internal/crypto"
 	"github.com/Devlaner/devlane/api/internal/store"
@@ -78,19 +80,28 @@ func NewSMTPEmailSender(instanceSettings *store.InstanceSettingStore, log *slog.
 			LogSkip(log, "instance email not configured", to, err)
 			return err
 		}
-		if err := SendWithSMTPSettings(cfg, to, subject, body, log); err != nil {
+		if err := SendWithSMTPSettings(ctx, cfg, to, subject, body, log); err != nil {
 			return err
 		}
 		return nil
 	}
 }
 
+const smtpSendTimeout = 15 * time.Second
+
 // SendWithSMTPSettings sends an email using the supplied SMTP settings without persisting them.
-func SendWithSMTPSettings(cfg *SMTPSettings, to, subject, body string, log *slog.Logger) error {
+func SendWithSMTPSettings(ctx context.Context, cfg *SMTPSettings, to, subject, body string, log *slog.Logger) error {
 	if cfg == nil {
 		return fmt.Errorf("SMTP settings not configured")
 	}
 	from := cfg.SenderEmail
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, smtpSendTimeout)
+	defer cancel()
+
 	if from == "" {
 		from = cfg.Username
 	}
@@ -104,53 +115,94 @@ func SendWithSMTPSettings(cfg *SMTPSettings, to, subject, body string, log *slog
 		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
 	}
 	msg := buildMessage(to, from, subject, body)
-	if err := sendMailWithConfig(addr, cfg.Host, cfg.Port, cfg.Security, auth, from, to, msg); err != nil {
+	if err := sendMailWithConfig(ctx, addr, cfg.Host, cfg.Port, cfg.Security, auth, from, to, msg); err != nil {
 		return err
 	}
 	return nil
 }
 
-// sendMailWithConfig sends email using smtp.SendMail or, for port 465 with SSL,
-// an explicit TLS connection (smtp.SendMail only supports STARTTLS).
-func sendMailWithConfig(addr, host string, port int, security string, auth smtp.Auth, from, to string, msg []byte) error {
+// sendMailWithConfig delivers an email over SMTP using context-aware dialing
+// and connection deadlines to bound SMTP read and write operations.
+func sendMailWithConfig(
+	ctx context.Context,
+	addr, host string,
+	port int,
+	security string,
+	auth smtp.Auth,
+	from, to string,
+	msg []byte,
+) error {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return err
+		}
+	}
+
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = conn.SetDeadline(time.Now())
+	})
+	defer stopCancel()
+
+	var client *smtp.Client
 	useImplicitTLS := port == 465 && strings.EqualFold(strings.TrimSpace(security), "SSL")
+
 	if useImplicitTLS {
-		conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: host})
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: host})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			return err
+		}
+
+		client, err = smtp.NewClient(tlsConn, host)
 		if err != nil {
 			return err
 		}
-		defer conn.Close()
-		client, err := smtp.NewClient(conn, host)
+	} else {
+		client, err = smtp.NewClient(conn, host)
 		if err != nil {
 			return err
 		}
-		defer client.Close()
-		if auth != nil {
-			if err := client.Auth(auth); err != nil {
+
+		// Preserve smtp.SendMail's existing behavior: use STARTTLS when the
+		// server advertises it.
+		if ok, _ := client.Extension("STARTTLS"); ok {
+			if err := client.StartTLS(&tls.Config{ServerName: host}); err != nil {
 				return err
 			}
 		}
-		if err := client.Mail(from); err != nil {
-			return err
-		}
-		if err := client.Rcpt(to); err != nil {
-			return err
-		}
-		w, err := client.Data()
-		if err != nil {
-			return err
-		}
-		if _, err := w.Write(msg); err != nil {
-			_ = w.Close()
-			return err
-		}
-		if err := w.Close(); err != nil {
-			return err
-		}
-		return client.Quit()
 	}
-	// STARTTLS (port 587) or no security: standard SendMail
-	return smtp.SendMail(addr, auth, from, []string{to}, msg)
+	defer client.Close()
+
+	if auth != nil {
+		if err := client.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := client.Mail(from); err != nil {
+		return err
+	}
+	if err := client.Rcpt(to); err != nil {
+		return err
+	}
+
+	writer, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(msg); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+
+	return client.Quit()
 }
 
 // sanitizeHeader removes CR/LF to prevent header injection.
