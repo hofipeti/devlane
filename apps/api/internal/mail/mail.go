@@ -87,7 +87,7 @@ func NewSMTPEmailSender(instanceSettings *store.InstanceSettingStore, log *slog.
 	}
 }
 
-const smtpSendTimeout = 15 * time.Second
+var smtpSendTimeout = 15 * time.Second
 
 // SendWithSMTPSettings sends an email using the supplied SMTP settings without persisting them.
 func SendWithSMTPSettings(ctx context.Context, cfg *SMTPSettings, to, subject, body string, log *slog.Logger) error {
